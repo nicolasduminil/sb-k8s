@@ -1,0 +1,19 @@
+apiVersion: skaffold/v4beta13
+kind: Config
+metadata:
+  name: sb-k8s
+build:
+  artifacts:
+    - image: nicolasduminil/k8s-sb:buildpacks
+      buildpacks:
+        builder: gcr.io/buildpacks/builder:v1
+        trustBuilder: true
+manifests:
+  rawYaml:
+    - k8s/certificate.yaml
+    - k8s/cluster-issuer.yaml
+    - k8s/configmap.yaml
+    - k8s/deployment-ss.yaml
+    - k8s/deployment.yaml
+    - k8s/secret.yaml
+    - k8s/service.yaml
