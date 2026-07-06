@@ -272,15 +272,56 @@ cluster. The easiest way to test it from your machine is to port-forward it:
 
     $ kubectl port-forward svc/sb-k8s 8443:8443
 
-Then, in another terminal, call the endpoint over HTTPS. Because the certificate
-is signed by a self-signed issuer, pass `-k` (or `--insecure`) to `curl` to skip
-certificate validation:
+Then, in another terminal, call the endpoint over HTTPS.
+
+### The quick way (skips verification)
+
+For a throw-away check you can pass `-k` (or `--insecure`), which tells `curl`
+**not to verify the server's certificate**:
 
     $ curl -k https://localhost:8443/hello/toto
     Hello toto
 
-The endpoint still greets you — this time over a TLS connection whose
-certificate is fully managed by cert-manager.
+Be aware of what `-k` really does: it does **not** disable TLS — the connection
+is still encrypted and the server still presents its certificate. It only turns
+off the client-side *identity* check. It is a convenience for testing, not how
+you would call a service in production.
+
+### The proper way (verifies the server)
+
+`-k` is not required here — the certificate is perfectly verifiable, it is simply
+signed by an issuer your machine does not trust by default. "Self-signed" means
+"not in the system trust store", not "unverifiable". cert-manager conveniently
+writes the signing certificate into the `ca.crt` entry of the `sb-k8s-cert`
+secret, so you can extract it and tell `curl` to trust it:
+
+    $ kubectl get secret sb-k8s-cert -o jsonpath='{.data.ca\.crt}' | base64 -d > ca.crt
+    $ curl --cacert ca.crt https://localhost:8443/hello/toto
+    Hello toto
+
+This time the server's identity is actually validated (the certificate has a
+`localhost` SAN, which is why `localhost` is accepted). If you point `curl` at a
+CA that did *not* sign the certificate — or omit `--cacert` so it falls back to
+the system trust store — the request is rejected with
+`unable to get local issuer certificate`. That rejection is the proof that
+verification is really happening.
+
+### Trusting the CA machine-wide (optional)
+
+If you would rather run `curl` (or a browser) with **no flags at all**, install
+that CA into your operating system's trust store once:
+
+    $ sudo cp ca.crt /usr/local/share/ca-certificates/sb-k8s-ca.crt
+    $ sudo update-ca-certificates
+    $ curl https://localhost:8443/hello/toto        # no -k, no --cacert
+    Hello toto
+
+Note that a certificate trusted with **zero configuration everywhere** (the way a
+public website is) requires one issued by a *publicly trusted* CA — for example
+via cert-manager's ACME (Let's Encrypt) issuer — which in turn needs a real,
+internet-resolvable domain name and a solvable ACME challenge. That is a
+deployment-to-a-real-domain concern and is not achievable against `localhost` on
+minikube; locally, trusting your own CA (as above) is the equivalent.
 
 ## Cleaning up
 
