@@ -285,20 +285,12 @@ you would expose the service through a `NodePort`, a `LoadBalancer`
 `sb-k8s` and `localhost`, so any other host/IP you expose it under must be added
 to the certificate's `dnsNames`/`ipAddresses` for verification to pass.
 
-Then, in another terminal, call the endpoint over HTTPS. Because the certificate
-is signed by a self-signed issuer, pass `-k` (or `--insecure`) to `curl` to skip
-certificate validation:
-
-    $ curl -k https://localhost:8443/hello/toto
-    Hello toto
-
-The endpoint still greets you — this time over a TLS connection whose
-certificate is fully managed by cert-manager.
-
-> **On the `mtls` branch this is different.** The server now *requires* a client
-> certificate (`server.ssl.client-auth = need`), so a plain `curl -k` with no
-> client certificate is rejected. See
-> [Mutual TLS (mTLS)](#mutual-tls-mtls) below for the full flow.
+Then, in another terminal, call the endpoint over HTTPS. **On this branch the
+server requires a client certificate** (`server.ssl.client-auth = need`), so a
+plain `curl -k` — or even `curl --cacert ca.crt` — with no client certificate is
+rejected during the handshake. The complete testing flow (quick vs verified,
+trusting the CA machine-wide, and the with/without-client-certificate contrast)
+is covered in [Testing mTLS](#testing-mtls) below.
 
 ## Cleaning up
 
@@ -460,21 +452,57 @@ Port-forward the service (leave it running in its own terminal):
 
     $ kubectl port-forward svc/sb-k8s 8443:8443
 
-**With a client certificate — succeeds.** `--cacert ca.crt` also lets `curl`
-validate the server properly (the server certificate has a `localhost` SAN), so
-`-k` is no longer needed:
+### The quick way (skips server verification)
+
+You can pass `-k` (or `--insecure`) to skip verifying the *server's* certificate.
+On this branch you still have to send the *client* certificate — `-k` only turns
+off the client-side identity check of the server, it does **not** disable TLS or
+waive the server's `client-auth = need` requirement:
+
+    $ curl -k --cert client.crt --key client.key https://localhost:8443/hello/toto
+    Hello toto
+
+### The proper way (verifies the server too)
+
+`-k` is not required — the server certificate is verifiable, it is just signed by
+a CA (`sb-k8s-ca`) your machine does not trust by default. cert-manager writes
+that CA into the `ca.crt` extracted above, so pass it with `--cacert` to validate
+the server for real (the certificate has a `localhost` SAN, which is why
+`localhost` is accepted):
 
     $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
     Hello toto
 
-**Without a client certificate — rejected.** The server aborts the handshake
-because `client-auth = need`:
+If you point `curl` at a CA that did *not* sign the server certificate — or omit
+`--cacert` so it falls back to the system trust store — the request fails with
+`unable to get local issuer certificate`. That is the proof the server is really
+being verified.
+
+### The mTLS check (client authentication)
+
+Now drop the client certificate but keep verifying the server. The server aborts
+the handshake because `client-auth = need`:
 
     $ curl --cacert ca.crt https://localhost:8443/hello/toto
     curl: (56) OpenSSL SSL_read: ... alert certificate required
 
-That failure is the proof that mutual TLS is enforced: only callers holding a
+That rejection is the proof that mutual TLS is enforced: only callers holding a
 certificate signed by `sb-k8s-ca` are allowed through.
+
+### Trusting the CA machine-wide (optional)
+
+To avoid passing `--cacert` every time, install the CA into your operating
+system's trust store once (you still need `--cert`/`--key` for client auth):
+
+    $ sudo cp ca.crt /usr/local/share/ca-certificates/sb-k8s-ca.crt
+    $ sudo update-ca-certificates
+    $ curl --cert client.crt --key client.key https://localhost:8443/hello/toto
+    Hello toto
+
+A certificate trusted with **zero configuration everywhere** (like a public
+website) would require one from a *publicly trusted* CA — e.g. via cert-manager's
+ACME (Let's Encrypt) issuer — which needs a real, internet-resolvable domain and
+a solvable ACME challenge, not achievable against `localhost` on minikube.
 
 > **Note** — at this stage authentication stops at the transport layer: the
 > server accepts or refuses the handshake but the application itself does not yet
