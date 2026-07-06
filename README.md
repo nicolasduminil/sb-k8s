@@ -145,12 +145,12 @@ manifests in one shot.
 |----------|------|---------|
 | `k8s/cluster-issuer.yaml` | `ClusterIssuer` | A cluster-wide, **self-signed** issuer (`ss-cluster-issuer`) used by cert-manager to sign the certificate. |
 | `k8s/certificate.yaml` | `Certificate` | Requests a certificate (`sb-k8s`) from the issuer. cert-manager stores the result in the `sb-k8s-cert` secret and, because of the `keystores.jks` block, also generates a **JKS keystore and truststore** protected by the password held in `jks-password-secret`. Uses an ECDSA/P-256 key, is valid for `sb-k8s` and `localhost`, and is renewed 5 minutes before expiry. |
-| `k8s/secret.yaml` | `Secret` | Holds the password (`jks-password-secret`) used both by cert-manager to create the JKS stores and by the application to open them. |
+| `k8s/secret.yaml` | `Secret` | Holds the password (`jks-password-secret`) used both by cert-manager to create the JKS stores and by the application to open them. The password is given under `stringData` so Kubernetes base64-encodes it for us (a plaintext value under `data` would be interpreted as base64 and decode to invalid bytes). |
 | `k8s/configmap.yaml` | `ConfigMap` | The externalised `application.properties`: switches the server to port `8443`, enables the Spring SSL *bundle* named `server`, and points the keystore/truststore locations at the mounted certificate. |
-| `k8s/deployment.yaml` | `Deployment` | Runs the application. Mounts the `sb-k8s-cert` secret (the JKS files) at `/opt/secret`, mounts the ConfigMap at `/config`, injects the keystore password via the `PASSWORD` env var and sets `CERT_PATH=/opt/secret`. Exposes the container on `8443`. |
+| `k8s/deployment.yaml` | `Deployment` | Runs the application. Mounts the `sb-k8s-cert` secret (the JKS files) at `/opt/secret`, mounts the ConfigMap at `/config`, injects the keystore password via the `PASSWORD` env var, sets `CERT_PATH=/opt/secret`, and points Spring at the mounted config with `SPRING_CONFIG_ADDITIONAL_LOCATION=/config/application.properties`. Exposes the container on `8443`. |
 | `k8s/service.yaml` | `Service` | A `ClusterIP` service exposing port `8443`. |
 | `k8s/deployment-ss.yaml` | `Deployment` | An **alternative** deployment that sources its configuration from HashiCorp Vault through the [Secrets Store CSI driver](https://secrets-store-csi-driver.sigs.k8s.io/) instead of a ConfigMap/Secret pair (see the last section). |
-| `skaffold.yaml` | Skaffold `Config` | Builds the image with Cloud Native Buildpacks and applies all the manifests above. |
+| `skaffold.yaml` | Skaffold `Config` | Builds the image with Cloud Native Buildpacks (the Paketo `builder-jammy-base` builder, with `BP_JVM_VERSION=21`) and applies all the manifests above. |
 
 ## Prerequisites
 
@@ -171,9 +171,37 @@ the `master` branch, you need:
 ### 2. Install cert-manager in the cluster
 
 cert-manager is not part of Kubernetes; it has to be installed once per cluster.
-The simplest way is to apply the official manifest (use the latest release tag):
+If it is already installed, skip this step.
 
-    $ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml
+**Recommended — with Helm.** This is the way used to develop this branch. It
+installs the CRDs together with the chart and makes upgrades/uninstalls clean:
+
+    $ helm install cert-manager \
+        oci://quay.io/jetstack/charts/cert-manager \
+        --version v1.20.2 \
+        --namespace cert-manager \
+        --create-namespace \
+        --set crds.enabled=true
+
+(Equivalently, from the Jetstack chart repository, after
+`helm repo add jetstack https://charts.jetstack.io && helm repo update`:
+`helm install cert-manager jetstack/cert-manager --namespace cert-manager
+--create-namespace --set crds.enabled=true`.)
+
+**Alternative — with `kubectl`.** You can instead apply the official static
+manifest (use the latest release tag):
+
+    $ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.20.2/cert-manager.yaml
+
+> **Note** — do not mix the two methods. If cert-manager was installed with
+> Helm, running `kubectl apply` on the static manifest prints warnings such as
+> *"resource ... is missing the kubectl.kubernetes.io/last-applied-configuration
+> annotation ..."*. These are harmless (kubectl patches the annotation and
+> reports the resources as `configured`), but overlaying a *different* version on
+> top of an existing install can leave CRDs and webhooks in a mixed state. Pick
+> one method and, if you need to switch, uninstall the previous one first
+> (`helm uninstall cert-manager -n cert-manager`). You can check what is already
+> present with `helm list -n cert-manager` and `kubectl get pods -n cert-manager`.
 
 Wait until the three cert-manager components are up before going further:
 
@@ -195,6 +223,18 @@ redeploy on every change; `Ctrl-C` then automatically cleans up what it created.
 
 Behind the scenes Skaffold creates, in order: the `ClusterIssuer`, the
 `Certificate`, the `ConfigMap`, the `Secret`, the `Deployment` and the `Service`.
+
+A couple of build details worth knowing:
+
+- The image is built with the **Paketo `builder-jammy-base`** builder and
+  `BP_JVM_VERSION=21` (this project targets Java 21). The Google Cloud
+  buildpacks builder (`gcr.io/buildpacks/builder:v1`) is *not* used because its
+  Ubuntu 18.04 base does not offer a Java 21 runtime.
+- The application container runs from `/workspace`, so Spring Boot's default
+  `./config/` lookup would resolve to `/workspace/config`, **not** the ConfigMap
+  mounted at `/config`. That is why `deployment.yaml` sets
+  `SPRING_CONFIG_ADDITIONAL_LOCATION=/config/application.properties`; without it
+  the server would ignore the ConfigMap and stay on the default HTTP port 8080.
 
 ### 4. Check that the certificate has been issued
 

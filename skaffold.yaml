@@ -3,11 +3,16 @@ kind: Config
 metadata:
   name: sb-k8s
 build:
+  tagPolicy:
+    envTemplate:
+      template: "buildpacks"
   artifacts:
-    - image: nicolasduminil/k8s-sb:buildpacks
+    - image: nicolasduminil/k8s-sb
       buildpacks:
-        builder: gcr.io/buildpacks/builder:v1
+        builder: paketobuildpacks/builder-jammy-base
         trustBuilder: true
+        env:
+          - "BP_JVM_VERSION=21"
 manifests:
   rawYaml:
     - k8s/certificate.yaml

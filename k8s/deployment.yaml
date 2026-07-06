@@ -25,6 +25,8 @@ spec:
                   name: jks-password-secret
             - name: CERT_PATH
               value: /opt/secret
+            - name: SPRING_CONFIG_ADDITIONAL_LOCATION
+              value: /config/application.properties
           volumeMounts:
             - mountPath: /opt/secret
               name: cert
