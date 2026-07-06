@@ -282,6 +282,11 @@ certificate validation:
 The endpoint still greets you — this time over a TLS connection whose
 certificate is fully managed by cert-manager.
 
+> **On the `mtls` branch this is different.** The server now *requires* a client
+> certificate (`server.ssl.client-auth = need`), so a plain `curl -k` with no
+> client certificate is rejected. See
+> [Mutual TLS (mTLS)](#mutual-tls-mtls) below for the full flow.
+
 ## Cleaning up
 
 If you deployed with `skaffold run`, remove everything it created with:
@@ -308,3 +313,95 @@ therefore **not** part of the default `skaffold run` flow described above (only
 on its own, once those prerequisites are in place, with:
 
     $ kubectl apply -f k8s/deployment-ss.yaml
+
+---
+
+# Mutual TLS (mTLS)
+
+> This section documents the **`mtls` branch**, which builds on the
+> `cert-manager` branch above. Everything already described (Skaffold, buildpacks,
+> the JKS keystore, the ConfigMap, `SPRING_CONFIG_ADDITIONAL_LOCATION`, …) still
+> applies; only the differences are listed here.
+
+The `cert-manager` branch uses **one-way TLS**: the server presents a
+certificate, the connection is encrypted, but *anyone* who can reach the socket
+gets served. The `mtls` branch turns on **mutual TLS**, so the server also
+requires the *client* to present a certificate signed by a trusted CA. A caller
+without a valid client certificate is rejected during the TLS handshake — this is
+authentication at the transport layer.
+
+## Why a CA hierarchy is required
+
+Plain mutual TLS cannot work with a single *self-signed* issuer: every
+certificate would be its own, unrelated root, so the server would have no way to
+validate a client certificate. This branch therefore introduces a tiny in-cluster
+PKI (in `k8s/issuers.yaml`):
+
+1. a **self-signed `Issuer`** (`selfsigned-issuer`) — used only to bootstrap the CA;
+2. a **CA certificate** (`sb-k8s-ca`, `isCA: true`) — the shared root of trust;
+3. a **CA `Issuer`** (`ca-issuer`) that signs **both** the server and the client
+   certificates.
+
+Because both certificates share the same CA, the server's truststore (which
+cert-manager fills with that CA) validates the client certificate, and vice
+versa. Namespaced `Issuer`s are used rather than `ClusterIssuer`s so the CA secret
+stays in the `default` namespace (a CA `ClusterIssuer` would expect it in
+cert-manager's cluster-resource namespace instead).
+
+## What changed compared to the `cert-manager` branch
+
+| Artifact | Change |
+|----------|--------|
+| `k8s/issuers.yaml` | **New** — replaces `cluster-issuer.yaml`. Holds the self-signed `Issuer`, the CA `Certificate`, and the CA `Issuer` described above. |
+| `k8s/certificate.yaml` | The server certificate is now signed by `ca-issuer` (was the self-signed issuer) and declares `usages: [server auth, …]`. |
+| `k8s/client-certificate.yaml` | **New** — a client certificate (`sb-k8s-client`, `usages: [client auth, …]`) signed by the same `ca-issuer`, stored as PEM in the `sb-k8s-client-cert` secret. |
+| `k8s/configmap.yaml` | Adds `server.ssl.client-auth = need`, which makes a client certificate mandatory. |
+| `skaffold.yaml` | Deploys `issuers.yaml` and `client-certificate.yaml`; no longer references `cluster-issuer.yaml`. |
+
+Deploy it exactly as before:
+
+    $ skaffold run
+
+and confirm all three certificates are issued:
+
+    $ kubectl get certificate
+
+    NAME            READY   SECRET               AGE
+    sb-k8s          True    sb-k8s-cert          1m
+    sb-k8s-ca       True    sb-k8s-ca            1m
+    sb-k8s-client   True    sb-k8s-client-cert   1m
+
+## Testing mTLS
+
+First extract the client certificate, its key and the CA from the
+`sb-k8s-client-cert` secret so `curl` can use them:
+
+    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.crt}' | base64 -d > client.crt
+    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.key}' | base64 -d > client.key
+    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.ca\.crt}'  | base64 -d > ca.crt
+
+Port-forward the service (leave it running in its own terminal):
+
+    $ kubectl port-forward svc/sb-k8s 8443:8443
+
+**With a client certificate — succeeds.** `--cacert ca.crt` also lets `curl`
+validate the server properly (the server certificate has a `localhost` SAN), so
+`-k` is no longer needed:
+
+    $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
+    Hello toto
+
+**Without a client certificate — rejected.** The server aborts the handshake
+because `client-auth = need`:
+
+    $ curl --cacert ca.crt https://localhost:8443/hello/toto
+    curl: (56) OpenSSL SSL_read: ... alert certificate required
+
+That failure is the proof that mutual TLS is enforced: only callers holding a
+certificate signed by `sb-k8s-ca` are allowed through.
+
+> **Note** — at this stage authentication stops at the transport layer: the
+> server accepts or refuses the handshake but the application itself does not yet
+> know *who* the caller is. Mapping the client certificate to an authenticated
+> principal (and authorizing on it) with Spring Security X.509 is the subject of a
+> later branch.

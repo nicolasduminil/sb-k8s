@@ -1,3 +1,7 @@
+# The SERVER certificate, signed by the CA issuer. cert-manager also builds a
+# JKS keystore (the server identity) and a JKS truststore (containing the CA)
+# out of it. The truststore is what the server uses to validate incoming client
+# certificates during the mTLS handshake.
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
@@ -10,9 +14,9 @@ spec:
         key: password
       create: true
   issuerRef:
-    name: ss-cluster-issuer
+    name: ca-issuer
+    kind: Issuer
     group: cert-manager.io
-    kind: ClusterIssuer
   privateKey:
     algorithm: ECDSA
     size: 256
@@ -21,4 +25,8 @@ spec:
     - localhost
   secretName: sb-k8s-cert
   commonName: sb-k8s
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
   renewBefore: 5m

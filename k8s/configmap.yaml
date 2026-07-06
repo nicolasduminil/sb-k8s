@@ -10,6 +10,7 @@ data:
     custom.property = test
     server.port = 8443
     server.ssl.bundle = server
+    server.ssl.client-auth = need
     spring.ssl.bundle.jks.server.keystore.location = ${CERT_PATH}/keystore.jks
     spring.ssl.bundle.jks.server.keystore.password = ${PASSWORD}
     spring.ssl.bundle.jks.server.keystore.type = JKS

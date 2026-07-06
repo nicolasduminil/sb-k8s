@@ -15,8 +15,9 @@ build:
           - "BP_JVM_VERSION=21"
 manifests:
   rawYaml:
+    - k8s/issuers.yaml
     - k8s/certificate.yaml
-    - k8s/cluster-issuer.yaml
+    - k8s/client-certificate.yaml
     - k8s/configmap.yaml
     - k8s/deployment.yaml
     - k8s/secret.yaml

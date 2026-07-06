@@ -1,0 +1,43 @@
+# A tiny in-cluster PKI for mTLS.
+#
+# 1. A bootstrap self-signed issuer, used only to sign the root CA below.
+# 2. A CA certificate (isCA: true) that becomes our root of trust.
+# 3. A CA issuer that signs BOTH the server and the client certificates, so
+#    they share a common CA. This is what lets the server's truststore validate
+#    the client certificate (and vice-versa) - impossible with a plain
+#    self-signed issuer where every certificate is its own, unrelated root.
+#
+# Namespaced Issuers (not ClusterIssuers) are used on purpose: a CA ClusterIssuer
+# expects its CA secret in cert-manager's "cluster resource namespace"
+# (cert-manager by default), whereas an Issuer reads it from its own namespace,
+# keeping everything self-contained in the "default" namespace.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sb-k8s-ca
+spec:
+  isCA: true
+  commonName: sb-k8s-ca
+  secretName: sb-k8s-ca
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: Issuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: ca-issuer
+spec:
+  ca:
+    secretName: sb-k8s-ca
