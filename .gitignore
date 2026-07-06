@@ -37,3 +37,7 @@ build/
 
 ### Mac OS ###
 .DS_Store
+# mTLS/TLS credentials extracted for local testing (never commit)
+/ca.crt
+/client.crt
+/client.key
