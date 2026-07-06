@@ -12,7 +12,7 @@ spec:
         app.kubernetes.io/name: sb-k8s
     spec:
       containers:
-        - image: nicolasduminil/k8s-sb:1.0-SNAPSHOT
+        - image: nicolasduminil/k8s-sb:buildpacks
           name: sb-k8s
           ports:
             - containerPort: 8443

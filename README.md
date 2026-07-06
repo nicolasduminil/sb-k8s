@@ -123,3 +123,148 @@ All you need to do now is to send a HTTP GET request to the endpoint, as follows
     Hello toto
 
 As you can see, as a proof a goodwill the endpoint greets you.
+
+---
+
+# The `cert-manager` branch: running the application over TLS
+
+The `master` branch above exposes the application over plain HTTP on port 8080.
+The `cert-manager` branch takes it one step further and serves the very same
+`/hello/{who}` endpoint over **HTTPS on port 8443**, using an X.509 certificate
+that is provisioned, renewed and rotated automatically by
+[cert-manager](https://cert-manager.io/).
+
+Instead of manually running `kubectl create deployment` and `kubectl expose`,
+this branch describes the whole desired state as a set of YAML manifests (under
+`k8s/`) and lets [Skaffold](https://skaffold.dev/) build the image and apply the
+manifests in one shot.
+
+## What changed compared to `master`
+
+| Artifact | Kind | Purpose |
+|----------|------|---------|
+| `k8s/cluster-issuer.yaml` | `ClusterIssuer` | A cluster-wide, **self-signed** issuer (`ss-cluster-issuer`) used by cert-manager to sign the certificate. |
+| `k8s/certificate.yaml` | `Certificate` | Requests a certificate (`sb-k8s`) from the issuer. cert-manager stores the result in the `sb-k8s-cert` secret and, because of the `keystores.jks` block, also generates a **JKS keystore and truststore** protected by the password held in `jks-password-secret`. Uses an ECDSA/P-256 key, is valid for `sb-k8s` and `localhost`, and is renewed 5 minutes before expiry. |
+| `k8s/secret.yaml` | `Secret` | Holds the password (`jks-password-secret`) used both by cert-manager to create the JKS stores and by the application to open them. |
+| `k8s/configmap.yaml` | `ConfigMap` | The externalised `application.properties`: switches the server to port `8443`, enables the Spring SSL *bundle* named `server`, and points the keystore/truststore locations at the mounted certificate. |
+| `k8s/deployment.yaml` | `Deployment` | Runs the application. Mounts the `sb-k8s-cert` secret (the JKS files) at `/opt/secret`, mounts the ConfigMap at `/config`, injects the keystore password via the `PASSWORD` env var and sets `CERT_PATH=/opt/secret`. Exposes the container on `8443`. |
+| `k8s/service.yaml` | `Service` | A `ClusterIP` service exposing port `8443`. |
+| `k8s/deployment-ss.yaml` | `Deployment` | An **alternative** deployment that sources its configuration from HashiCorp Vault through the [Secrets Store CSI driver](https://secrets-store-csi-driver.sigs.k8s.io/) instead of a ConfigMap/Secret pair (see the last section). |
+| `skaffold.yaml` | Skaffold `Config` | Builds the image with Cloud Native Buildpacks and applies all the manifests above. |
+
+## Prerequisites
+
+In addition to `docker`, `minikube` and a DockerHub account already required by
+the `master` branch, you need:
+
+- [`kubectl`](https://kubernetes.io/docs/tasks/tools/) (bundled with `minikube`);
+- [`skaffold`](https://skaffold.dev/docs/install/);
+- [cert-manager](https://cert-manager.io/docs/installation/) installed **in the
+  cluster** (see below).
+
+## Building, deploying and running
+
+### 1. Start minikube
+
+    $ minikube start
+
+### 2. Install cert-manager in the cluster
+
+cert-manager is not part of Kubernetes; it has to be installed once per cluster.
+The simplest way is to apply the official manifest (use the latest release tag):
+
+    $ kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.17.1/cert-manager.yaml
+
+Wait until the three cert-manager components are up before going further:
+
+    $ kubectl wait --for=condition=Available --timeout=120s -n cert-manager deployment --all
+
+    deployment.apps/cert-manager condition met
+    deployment.apps/cert-manager-cainjector condition met
+    deployment.apps/cert-manager-webhook condition met
+
+### 3. Build the image and deploy everything with Skaffold
+
+From the project root, a single command builds the image and applies all the
+manifests listed in `skaffold.yaml`:
+
+    $ skaffold run
+
+Use `skaffold dev` instead if you want Skaffold to keep watching your sources and
+redeploy on every change; `Ctrl-C` then automatically cleans up what it created.
+
+Behind the scenes Skaffold creates, in order: the `ClusterIssuer`, the
+`Certificate`, the `ConfigMap`, the `Secret`, the `Deployment` and the `Service`.
+
+### 4. Check that the certificate has been issued
+
+cert-manager needs a few seconds to sign the certificate and to write the JKS
+keystore/truststore into the `sb-k8s-cert` secret:
+
+    $ kubectl get certificate
+
+    NAME     READY   SECRET        AGE
+    sb-k8s   True    sb-k8s-cert   20s
+
+    $ kubectl get secret sb-k8s-cert -o jsonpath='{.data}' | tr ',' '\n'
+
+You should see `keystore.jks` and `truststore.jks` entries alongside the usual
+`tls.crt`/`tls.key`. If `READY` stays `False`, describe the resource to find out
+why:
+
+    $ kubectl describe certificate sb-k8s
+
+### 5. Check that the pod is running
+
+    $ kubectl get pods
+
+    NAME                      READY   STATUS    RESTARTS   AGE
+    sb-k8s-6d4c9f8b7c-abcde   1/1     Running   0          30s
+
+If needed, follow the application logs to confirm it started on the HTTPS port:
+
+    $ kubectl logs -l app.kubernetes.io/name=sb-k8s -f
+
+## Testing the HTTPS endpoint
+
+The service is of type `ClusterIP`, so it is only reachable from inside the
+cluster. The easiest way to test it from your machine is to port-forward it:
+
+    $ kubectl port-forward svc/sb-k8s 8443:8443
+
+Then, in another terminal, call the endpoint over HTTPS. Because the certificate
+is signed by a self-signed issuer, pass `-k` (or `--insecure`) to `curl` to skip
+certificate validation:
+
+    $ curl -k https://localhost:8443/hello/toto
+    Hello toto
+
+The endpoint still greets you — this time over a TLS connection whose
+certificate is fully managed by cert-manager.
+
+## Cleaning up
+
+If you deployed with `skaffold run`, remove everything it created with:
+
+    $ skaffold delete
+
+cert-manager itself (and the `minikube` cluster) can be left in place for the
+next run, or removed with `kubectl delete -f <the cert-manager manifest URL>` and
+`minikube delete`.
+
+## Alternative: sourcing the configuration from Vault (`deployment-ss.yaml`)
+
+`k8s/deployment-ss.yaml` demonstrates a variant where the application is not fed
+by a ConfigMap/Secret but by [HashiCorp Vault](https://www.vaultproject.io/)
+through the [Secrets Store CSI driver](https://secrets-store-csi-driver.sigs.k8s.io/).
+Spring Boot is pointed at the mounted file via
+`SPRING_CONFIG_ADDITIONAL_LOCATION=/mnt/secrets-store/application.properties`.
+
+This path requires extra components in the cluster (the Secrets Store CSI driver,
+the Vault provider and a `SecretProviderClass` named `vault-database`) and is
+therefore **not** part of the default `skaffold run` flow described above (only
+`deployment.yaml` is listed in `skaffold.yaml`). Both manifests define a
+`Deployment` named `sb-k8s`, so they are mutually exclusive: deploy this variant
+on its own, once those prerequisites are in place, with:
+
+    $ kubectl apply -f k8s/deployment-ss.yaml
