@@ -272,6 +272,19 @@ cluster. The easiest way to test it from your machine is to port-forward it:
 
     $ kubectl port-forward svc/sb-k8s 8443:8443
 
+`skaffold.yaml` also declares this forward, so you can let Skaffold manage it
+instead — it re-establishes the tunnel automatically whenever the pod is
+replaced (which a manual `kubectl port-forward` does not):
+
+    $ skaffold dev --port-forward
+
+Note that `port-forward` is a local debugging convenience, not a way to *run* the
+service — it is a single tunnel to one pod, tied to your machine. For real access
+you would expose the service through a `NodePort`, a `LoadBalancer`
+(`minikube tunnel`), or an `Ingress`; keep in mind the certificate's SANs are
+`sb-k8s` and `localhost`, so any other host/IP you expose it under must be added
+to the certificate's `dnsNames`/`ipAddresses` for verification to pass.
+
 Then, in another terminal, call the endpoint over HTTPS. Because the certificate
 is signed by a self-signed issuer, pass `-k` (or `--insecure`) to `curl` to skip
 certificate validation:
@@ -296,6 +309,69 @@ If you deployed with `skaffold run`, remove everything it created with:
 cert-manager itself (and the `minikube` cluster) can be left in place for the
 next run, or removed with `kubectl delete -f <the cert-manager manifest URL>` and
 `minikube delete`.
+
+## Switching branches and redeploying (`redeploy.sh`)
+
+This repository has more than one branch (`cert-manager`, `mtls`, …). Switching
+between them is a *cluster* operation, not a minikube one: **minikube and
+cert-manager stay up the whole time** — only the application's own resources are
+recreated. In particular there is no need to stop/restart minikube or to build
+by hand (`skaffold run` builds and deploys in one step).
+
+The `redeploy.sh` helper automates the full sequence — tear down, optionally
+switch branch, rebuild and redeploy, then re-extract `ca.crt` (and, on the
+`mtls` branch, the client certificate) ready for testing:
+
+    $ ./redeploy.sh              # redeploy the current branch
+    $ ./redeploy.sh mtls         # switch to mtls, then redeploy
+    $ ./redeploy.sh cert-manager # switch to cert-manager, then redeploy
+
+Under the hood it runs `skaffold delete`, `git checkout <branch>`, then
+`skaffold run -p reset`. The **`reset` profile** (defined in `skaffold.yaml`)
+deletes the cert-manager-generated secrets *before* deploying, so the new branch
+gets freshly issued certificates. This matters when switching branches because
+those secrets are not garbage-collected on their own and their contents differ
+between branches; it is kept in a profile so a plain `skaffold dev` / `skaffold
+run` does not needlessly re-issue certificates on every cycle.
+
+Two things the script takes care of that are easy to forget by hand: the
+`ca.crt` **changes** between branches (different issuer), so it must be
+re-extracted, and a manual `kubectl port-forward` dies with the old pod and has
+to be restarted (using `skaffold dev --port-forward` avoids that entirely).
+
+## `cert-manager` vs `mtls`: the subtle difference
+
+The `cert-manager` and `mtls` branches look almost identical — same cert-manager,
+same JKS keystore, same Skaffold flow, HTTPS on 8443 — yet they answer two
+different questions, and the difference is easy to miss:
+
+- **`cert-manager` — one-way (server) TLS.** The server presents a certificate;
+  the connection is encrypted and the *client can verify the server*. The client
+  is **not** authenticated. So this succeeds with no client certificate:
+
+      $ curl --cacert ca.crt https://localhost:8443/hello/toto
+      Hello toto
+
+- **`mtls` (this branch) — mutual TLS.** Everything above, **plus** the server
+  *requires and verifies a client certificate* (`server.ssl.client-auth = need`).
+  The exact same command above is now **rejected** during the handshake:
+
+      $ curl --cacert ca.crt https://localhost:8443/hello/toto
+      curl: (56) ... tlsv13 alert certificate required
+
+  and you must present a client certificate signed by the trusted CA:
+
+      $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
+      Hello toto
+
+The subtlety is that the two are indistinguishable *until a client connects
+without a certificate*: only then does `mtls` reject it. Under the hood the
+enabling differences are small but essential — `mtls` adds
+`server.ssl.client-auth = need`, a **CA hierarchy** (a self-signed root → CA
+issuer signing *both* server and client certs, so the server can validate the
+client), and a **client certificate**. The `cert-manager` branch instead uses a
+single self-signed issuer and never asks the client for anything. The full setup
+is described in [Mutual TLS (mTLS)](#mutual-tls-mtls) below.
 
 ## Alternative: sourcing the configuration from Vault (`deployment-ss.yaml`)
 
