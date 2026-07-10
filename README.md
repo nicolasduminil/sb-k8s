@@ -140,6 +140,74 @@ across a rotation, and it is the difference from the self-signed `cert-manager`
 branch, where `ca.crt` rotates together with the leaf and this whole walkthrough is
 impossible.
 
+### Trying it end to end
+
+The steps below are the runnable version of everything in this section, framed as
+two experiments: without in-place reload the pod eventually breaks; with it, the pod
+keeps working. They assume `minikube` and `cert-manager` are already installed (see
+the top of this README).
+
+**Setup**
+
+1. Shorten the server certificate so it expires within the hour — cert-manager's
+   minimum is one hour — by adding `duration: 1h` to `k8s/certificate.yaml` (it
+   already carries `renewBefore: 5m`):
+
+       spec:
+         duration: 1h
+         renewBefore: 5m
+
+2. Deploy; `redeploy.sh` also extracts `ca.crt`, `client.crt` and `client.key` for
+   testing:
+
+       $ ./redeploy.sh mtls
+
+3. Forward the port (or use `skaffold dev --port-forward`, which survives pod
+   restarts):
+
+       $ kubectl port-forward svc/sb-k8s 8443:8443
+
+4. Confirm it works now. Because `client-auth = need`, every call needs the client
+   certificate — `--cacert` alone is refused regardless of expiry:
+
+       $ curl --cacert ca.crt --cert client.crt --key client.key \
+           https://localhost:8443/hello/toto
+       Hello toto
+
+**Experiment A — no `reload-on-update`: the pod breaks after an hour**
+
+5. Change nothing else and come back after *just over* an hour. cert-manager rotated
+   the secret ~5 minutes before expiry, but the running app never reloaded it and is
+   still serving the certificate it read at startup — which has now expired — so the
+   same call fails:
+
+       $ curl --cacert ca.crt --cert client.crt --key client.key \
+           https://localhost:8443/hello/toto
+       curl: (60) SSL certificate problem: certificate has expired
+
+**Experiment B — with `reload-on-update`: the pod keeps working**
+
+6. Enable in-place reload by adding to the bundle in `k8s/configmap.yaml`:
+
+       spring.ssl.bundle.jks.server.reload-on-update = true
+
+7. Redeploy and forward again:
+
+       $ ./redeploy.sh mtls
+       $ kubectl port-forward svc/sb-k8s 8443:8443
+
+8. Come back after *just over* an hour and repeat the exact same call. This time the
+   server reloaded the rotated certificate in place, and because `ca.crt` (the CA)
+   never changed, the unchanged client command still succeeds:
+
+       $ curl --cacert ca.crt --cert client.crt --key client.key \
+           https://localhost:8443/hello/toto
+       Hello toto
+
+A failing, B still working with no client-side change — that contrast is the whole
+point of pairing cert-manager rotation with SSL-bundle reloading on a stable CA. The
+subsections below explain each moving part.
+
 ### Watching it happen
 
 By default cert-manager issues a 90-day certificate, so nothing visibly rotates
