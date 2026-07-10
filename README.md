@@ -188,6 +188,58 @@ internet-resolvable domain name and a solvable ACME challenge. That is a
 deployment-to-a-real-domain concern and is not achievable against `localhost` on
 minikube. Locally, trusting our own CA, as above, is the equivalent.
 
+## Certificate renewal and rotation
+
+cert-manager owns the whole lifecycle of the `sb-k8s` certificate, not just its
+first issuance. Two fields on `k8s/certificate.yaml` drive it: the certificate's
+`duration` (how long each certificate stays valid) and `renewBefore` (how long
+before expiry a replacement is issued). When that moment arrives cert-manager
+signs a new certificate from `ss-cluster-issuer`, rebuilds the JKS keystore and
+truststore, and overwrites the `sb-k8s-cert` secret in place — the secret name
+never changes, only its contents.
+
+Because `ss-cluster-issuer` is a **self-signed** issuer, there is no separate,
+long-lived CA: each certificate is its own root, so `ca.crt` in the secret is the
+leaf itself and is re-generated on every renewal. That is enough to demonstrate
+*that* rotation happens, but it also means a client cannot keep trusting one stable
+CA across rotations — see the note at the end of this section.
+
+### Watching it happen
+
+cert-manager records the schedule on the `Certificate` object itself:
+
+    $ kubectl get certificate sb-k8s \
+        -o jsonpath='{.status.notAfter}{"\n"}{.status.renewalTime}{"\n"}'
+
+`notAfter` is the expiry; `renewalTime` is when cert-manager plans to rotate (five
+minutes earlier). The serial number carried inside the issued certificate is the
+cleanest rotation fingerprint — it changes on every renewal:
+
+    $ kubectl get secret sb-k8s-cert -o jsonpath='{.data.tls\.crt}' \
+        | base64 -d | openssl x509 -noout -serial -dates
+
+With the 90-day default nothing visibly rotates during a test session. To watch a
+full cycle on a human timescale, shorten the lifetime temporarily (cert-manager
+enforces a one-hour minimum, and `renewBefore` must be smaller than `duration`):
+
+    spec:
+      duration: 1h
+      renewBefore: 5m       # renew five minutes before the hour is up
+
+Reapply the manifest so cert-manager adopts the new lifetime — it then re-issues
+straight away and keeps rotating on the shortened schedule:
+
+    $ kubectl apply -f k8s/certificate.yaml
+
+Because this branch's issuer is self-signed, the walkthrough stops here: `ca.crt`
+rotates together with the leaf, so a client cannot keep validating against a single
+pinned CA across renewals, and the application cannot reload rotated certificates
+in a way that stays trusted. Getting a running application to pick up rotated
+certificates in place — and keep clients connected across a rotation — relies on a
+**stable CA** that outlives the leaf certificates. That PKI (`selfsigned-issuer` →
+CA certificate → `ca-issuer`), together with the `reload-on-update` walkthrough
+that depends on it, lives on the `mtls` branch; see that branch's README.
+
 ## Cleaning up
 
 If you deployed with `skaffold run`, remove everything it created with:
