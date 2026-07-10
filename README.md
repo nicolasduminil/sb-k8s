@@ -122,6 +122,162 @@ system's trust store once (you still need `--cert`/`--key` for client auth):
 > principal (and authorizing on it) with Spring Security X.509 is the subject of a
 > later branch.
 
+## Certificate renewal and rotation
+
+cert-manager owns the whole lifecycle of the server certificate, not just its first
+issuance. `renewBefore` on `k8s/certificate.yaml` says how long before expiry a
+replacement is issued; when that moment arrives cert-manager signs a new server
+certificate from `ca-issuer`, rebuilds the JKS keystore and truststore, and
+overwrites the `sb-k8s-cert` secret in place — the secret name never changes, only
+its contents.
+
+The property that makes this branch interesting is its **stable CA**. The server
+leaf is signed by `ca-issuer`, which is backed by the long-lived `sb-k8s-ca`
+certificate (see [Why a CA hierarchy is required](#why-a-ca-hierarchy-is-required)).
+So while the server leaf rotates, `ca.crt` — the CA the client pins with `--cacert`
+— does *not* change. That is exactly what lets a client keep trusting the connection
+across a rotation, and it is the difference from the self-signed `cert-manager`
+branch, where `ca.crt` rotates together with the leaf and this whole walkthrough is
+impossible.
+
+### Watching it happen
+
+By default cert-manager issues a 90-day certificate, so nothing visibly rotates
+during a test session. To watch a full cycle on a human timescale, shorten the
+server certificate's lifetime (cert-manager enforces a one-hour minimum) by adding a
+`duration` to `k8s/certificate.yaml`:
+
+    spec:
+      duration: 1h
+      renewBefore: 5m       # renew five minutes before the hour is up
+
+Reapply it so cert-manager adopts the new lifetime — it re-issues straight away and
+keeps rotating on the shortened schedule:
+
+    $ kubectl apply -f k8s/certificate.yaml
+
+cert-manager records the schedule on the `Certificate` object itself:
+
+    $ kubectl get certificate sb-k8s \
+        -o jsonpath='{.status.notAfter}{"\n"}{.status.renewalTime}{"\n"}'
+
+`notAfter` is the expiry; `renewalTime` is when cert-manager plans to rotate. The
+serial inside the issued certificate is the cleanest rotation fingerprint — it
+changes on every renewal, while `ca.crt` stays the same:
+
+    $ kubectl get secret sb-k8s-cert -o jsonpath='{.data.tls\.crt}' \
+        | base64 -d | openssl x509 -noout -serial -dates
+
+### Does the running application pick up the new certificate?
+
+Rotating the secret is only half the story. The pod mounts `keystore.jks` and
+`truststore.jks` from that secret (see `CERT_PATH` in `k8s/deployment.yaml`), and
+two things stand between a rotated secret and a server that actually serves the new
+certificate.
+
+First, kubelet refreshes the mounted files a short while after the secret changes
+(up to ~60–90 s), not instantly. Second, and more importantly, Spring Boot reads
+the keystore when it builds its SSL context. This project configures TLS through an
+**SSL bundle** (`server.ssl.bundle = server` in `k8s/configmap.yaml`) rather than
+the classic `server.ssl.key-store`, and that matters: SSL bundles can be reloaded
+without a restart. Add one property to the bundle —
+
+    spring.ssl.bundle.jks.server.reload-on-update = true
+
+— and Spring Boot watches the keystore and truststore files and rebuilds the SSL
+context in place when cert-manager rotates them, so the new certificate is served
+with no downtime. Without that property the bundle is read once at startup and a
+rotated secret is ignored until the pod restarts (`kubectl rollout restart
+deployment/sb-k8s`, or a controller such as
+[Reloader](https://github.com/stakater/Reloader) to automate it).
+
+To verify end-to-end — not merely that the secret rotated, but that the server
+presents the new certificate — compare the serial seen on the wire against the one
+stored in the secret:
+
+    $ kubectl port-forward svc/sb-k8s 8443:8443 &
+    $ echo | openssl s_client -connect localhost:8443 2>/dev/null \
+        | openssl x509 -noout -serial -dates
+
+If the served serial still matches the old one after a rotation, the SSL context has
+not reloaded — enable `reload-on-update` or restart the pod.
+
+### Proving the old certificate is retired and the renewed one works
+
+Because the client trusts the stable CA (`ca.crt`), not one specific leaf, and both
+the old and the renewed server certificate are signed by that same CA, a CA-trusting
+client keeps connecting across a rotation — that is the whole point of the CA
+hierarchy. "The old one no longer works" therefore does not mean the client suddenly
+rejects the connection: it means the server stops presenting the old certificate
+and, once past its `notAfter`, that certificate is expired and fails validation if
+anything still offers it. The clean way to show both halves is a before/after
+capture of what the server actually serves on the wire.
+
+Before rotating, with the port-forward still running, record the current serial and
+keep a copy of the leaf:
+
+    $ echo | openssl s_client -connect localhost:8443 2>/dev/null \
+        | openssl x509 -noout -serial -enddate         # note the serial + notAfter
+    $ echo | openssl s_client -connect localhost:8443 2>/dev/null \
+        | openssl x509 > old-cert.pem                  # keep the old leaf
+
+Wait for `renewBefore` to fire (or restart the pod once the secret has rotated,
+unless `reload-on-update = true` is set, in which case the server swaps over on its
+own). Read the wire again:
+
+    $ echo | openssl s_client -connect localhost:8443 2>/dev/null \
+        | openssl x509 -noout -serial -enddate
+
+The **renewed certificate works** when this handshake still succeeds *and* the
+serial has changed to a later `notAfter`. Confirm a real mTLS request still goes
+through with the *same* `ca.crt` and client certificate as before — nothing on the
+client side had to change:
+
+    $ curl --cacert ca.crt --cert client.crt --key client.key \
+        https://localhost:8443/hello/toto
+    Hello toto
+
+The **old certificate is retired** on two counts. The server no longer offers it —
+the serial above is the new one, not the value you saved. And the copy you kept is
+now past its lifetime, which `openssl` confirms directly against the stable CA:
+
+    $ openssl x509 -in old-cert.pem -noout -checkend 0    # "is it expired right now?"
+    Certificate expired
+
+    $ openssl verify -CAfile ca.crt old-cert.pem          # validate old leaf against the CA
+    old-cert.pem: ... certificate has expired
+
+Before the old one-hour certificate reaches its `notAfter` both commands still
+report it valid; once it expires they flip as shown.
+
+### Watching an expired certificate get rejected
+
+The checks above validate a saved file; the more convincing proof is a live
+handshake refused because the certificate on the wire has expired. That happens
+naturally when `reload-on-update` is *not* enabled: the server keeps serving the
+certificate it read at startup and ignores the rotated secret, so once that
+in-memory certificate passes its one-hour `notAfter` the running server is presenting
+an expired certificate. From then on the client rejects it:
+
+    $ curl --cacert ca.crt --cert client.crt --key client.key \
+        https://localhost:8443/hello/toto
+    curl: (60) SSL certificate problem: certificate has expired
+
+    $ echo | openssl s_client -connect localhost:8443 2>/dev/null | grep -i verify
+    Verify return code: 10 (certificate has expired)
+
+(The exact wording varies a little between curl/OpenSSL versions.) This is the
+concrete reason to enable `reload-on-update` or restart the pod on rotation: left
+alone, a long-running pod will eventually serve a stale, expired certificate and
+break TLS on its own — even though cert-manager rotated the secret an hour earlier.
+
+> **The client certificate rotates too.** `sb-k8s-client` renews on its own
+> lifecycle, and because `client-auth = need` the *server* validates it against its
+> truststore on every handshake. An expired client certificate is refused exactly
+> like the missing one in
+> [The mTLS check](#the-mtls-check-client-authentication) — the mutual counterpart
+> of the rejection above.
+
 ## Switching branches and redeploying
 
 This repository has more than one branch: `cert-manager`, `mtls`, …. Switching
