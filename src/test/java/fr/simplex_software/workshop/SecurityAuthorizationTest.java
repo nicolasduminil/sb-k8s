@@ -15,10 +15,6 @@ import static org.springframework.security.test.web.servlet.setup.SecurityMockMv
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
-// Tier 1: fast authorization-logic check, no cluster. @WithUserDetails loads the
-// principal from the real UserDetailsService, so the CN->roles mapping is
-// exercised; only the actual TLS/certificate handshake is out of scope (see
-// SecurityE2eIT).
 @WebMvcTest(K8sSbController.class)
 @Import(SecurityConfig.class)
 class SecurityAuthorizationTest
@@ -28,8 +24,6 @@ class SecurityAuthorizationTest
   @BeforeEach
   void setUp(WebApplicationContext context)
   {
-    // Build MockMvc with springSecurity() so @WithUserDetails' test principal is
-    // bridged into the request (the auto-configured MockMvc omits that).
     mockMvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
   }
 

@@ -24,8 +24,8 @@ if [[ -n "$TARGET" ]]; then
 fi
 
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-# The 'reset' profile deletes the cert-manager-generated secrets before deploying
-# (they are not garbage-collected and differ between branches), so the new branch
+# The 'reset' profile deletes the cert-manager-generated secrets before deploying.
+# They are not garbage-collected and differ between branches, so the new branch
 # gets freshly issued certificates.
 echo "==> Building and deploying branch '$BRANCH' (skaffold run -p reset)"
 skaffold run -p reset

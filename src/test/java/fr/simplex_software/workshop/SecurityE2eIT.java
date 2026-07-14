@@ -14,12 +14,6 @@ import static org.assertj.core.api.Assertions.*;
 import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assumptions.*;
 
-// Tier 2: end-to-end against the DEPLOYED app. Hits the port-forwarded service on
-// localhost:8443 over a real mTLS handshake, using the PKCS12 keystores that
-// start-all.sh / redeploy.sh build from the cluster-issued certificates. It
-// self-skips when the cluster/port-forward is not up, so `mvn verify` is green on
-// a bare checkout; run ./start-all.sh (or ./redeploy.sh mtls-security) first to
-// exercise it for real.
 class SecurityE2eIT
 {
   static final String PASSWORD = "changeit";

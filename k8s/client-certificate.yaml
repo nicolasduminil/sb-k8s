@@ -47,8 +47,9 @@ spec:
   renewBefore: 5m
 ---
 # A CA-signed certificate whose CN is deliberately NOT one of the known
-# identities in SecurityConfig. It clears the mTLS handshake (the CA is trusted)
-# yet the app rejects it (401/403) - the e2e case that proves authorization is
+# identities in SecurityConfig. It passes the mTLS handshake as the CA is trusted
+# yet the app rejects it (401/403).
+# See - the e2e case that proves authorization is
 # keyed on identity, not merely on CA trust.
 apiVersion: cert-manager.io/v1
 kind: Certificate
