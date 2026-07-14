@@ -16,6 +16,11 @@
     <maven.compiler.source>21</maven.compiler.source>
     <maven.compiler.target>21</maven.compiler.target>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <!-- Spring Boot 4 manages Groovy 5, but REST Assured 5.5.0 (test only) is
+         built against Groovy 4 and its Groovy request pipeline breaks on Groovy 5.
+         Pin Groovy to the 4.0.x line REST Assured expects. Groovy is a test-scope
+         transitive of REST Assured only; the application itself uses no Groovy. -->
+    <groovy.version>4.0.22</groovy.version>
   </properties>
   <dependencies>
     <dependency>
@@ -31,14 +36,19 @@
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
     </dependency>
+    <!-- Real HTTPS integration tests: REST Assured drives the running server with
+         actual client certificates; BouncyCastle mints the throwaway CA hierarchy
+         and JKS key/trust stores the handshake needs. -->
     <dependency>
-      <groupId>org.springframework.boot</groupId>
-      <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <groupId>io.rest-assured</groupId>
+      <artifactId>rest-assured</artifactId>
+      <version>5.5.0</version>
       <scope>test</scope>
     </dependency>
     <dependency>
-      <groupId>org.springframework.security</groupId>
-      <artifactId>spring-security-test</artifactId>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bcpkix-jdk18on</artifactId>
+      <version>1.84</version>
       <scope>test</scope>
     </dependency>
   </dependencies>

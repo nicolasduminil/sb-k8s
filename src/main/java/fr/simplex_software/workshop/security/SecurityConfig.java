@@ -9,29 +9,8 @@ import org.springframework.security.core.userdetails.*;
 import org.springframework.security.provisioning.*;
 import org.springframework.security.web.*;
 
-/**
- * Turns the transport-level mTLS handshake into an authenticated, authorized
- * application identity.
- *
- * <p>On the {@code mtls} branch the server merely required <em>a</em> client
- * certificate signed by the trusted CA ({@code server.ssl.client-auth = need}):
- * every CA-signed caller was equally, anonymously accepted. Here Spring Security
- * X.509 reads the client certificate's subject Common Name and maps it, through
- * {@link #userDetailsService()}, to a named principal with roles. The certificate
- * is no longer just a key to the door - it <em>is</em> the user's identity.</p>
- *
- * <p>The mapping is: {@code CN=sb-k8s-admin} -&gt; ROLE_ADMIN + ROLE_USER,
- * {@code CN=sb-k8s-user} -&gt; ROLE_USER. A certificate that is CA-signed (so it
- * clears the TLS handshake) but whose CN is unknown here is rejected at the
- * authentication layer with 401 - proving the app authorizes on identity, not
- * merely on CA trust.</p>
- */
 @Configuration
 @EnableWebSecurity
-// Enable JSR-250 (@RolesAllowed / @PermitAll / @DenyAll) so the controller
-// endpoints declare their own required roles next to the code they protect,
-// rather than in a central request-matcher list. @RolesAllowed("ADMIN") maps to
-// the ROLE_ADMIN authority (the default role prefix).
 @EnableMethodSecurity(jsr250Enabled = true)
 public class SecurityConfig
 {
@@ -39,25 +18,14 @@ public class SecurityConfig
   public SecurityFilterChain filterChain(HttpSecurity http) throws Exception
   {
     return http
-      // The only web-layer rule: every request must be an authenticated,
-      // certificate-resolved identity. The per-endpoint role checks live on the
-      // controller as JSR-250 annotations.
       .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
-      // Extract the principal from the certificate subject's CN, then resolve it
-      // to a UserDetails (roles). This is the "user identity based" validation.
       .x509(x509 -> x509
         .subjectPrincipalRegex("CN=(.*?)(?:,|$)")
         .userDetailsService(userDetailsService()))
-      // Stateless, certificate-authenticated API: no login form, no CSRF token.
       .csrf(AbstractHttpConfigurer::disable)
       .build();
   }
 
-  /**
-   * The registry of known certificate identities. Passwords are irrelevant under
-   * X.509 authentication (the certificate is the credential), but UserDetails
-   * requires a non-null value, hence the {@code {noop}} placeholder.
-   */
   @Bean
   public UserDetailsService userDetailsService()
   {

@@ -156,7 +156,7 @@ authentication layer — CA trust alone is no longer enough.
 
 | Artifact | Change |
 |----------|--------|
-| `pom.xml` | Adds `spring-boot-starter-security`, plus `spring-security-test` / `spring-boot-starter-webmvc-test` for the tests. |
+| `pom.xml` | Adds `spring-boot-starter-security`, plus `rest-assured` and `bouncycastle` (`bcpkix`) for the HTTPS integration test (Groovy is pinned to 4.0.x there, the line REST Assured expects). |
 | `SecurityConfig.java` | New — the X.509 filter chain (baseline `anyRequest().authenticated()`), CN→principal regex, the in-memory identity registry and `@EnableMethodSecurity(jsr250Enabled = true)`. |
 | `K8sSbController.java` | `/hello/{who}` now names the authenticated caller; adds `/whoami` (echoes the resolved identity + authorities) and an admin-only `/admin`. Roles are enforced with JSR-250 `@RolesAllowed`. |
 | `k8s/client-certificate.yaml` | Now issues **two** client certificates — `sb-k8s-admin` and `sb-k8s-user` (different CNs) — into `sb-k8s-admin-cert` / `sb-k8s-user-cert`, replacing the single `sb-k8s-client`. |
@@ -204,9 +204,15 @@ to plain mTLS (both hold a CA-signed certificate) are told apart by *identity*.
 Dropping the client certificate entirely still fails at the handshake exactly as
 on the `mtls` branch, since `client-auth = need` is unchanged.
 
-The same authorization rules are covered without a cluster by
-`SecurityAuthorizationTest` (`mvn test`), which uses the Spring Security test
-support to stand in for the certificate-resolved principal.
+All of this is covered without a cluster by `SecurityIntegrationTest`
+(`mvn test`). It is a genuine integration test: it boots the app on HTTPS with
+`client-auth = need` and drives it with **REST Assured** over a real TLS
+handshake, presenting actual client certificates. A throwaway CA hierarchy and
+the JKS key/trust stores are minted in-memory by `TestPki` (via BouncyCastle),
+mirroring what cert-manager does in the cluster — so the test exercises the whole
+chain end to end, including the two cases a mocked principal cannot reach: a
+missing certificate (handshake refused) and a CA-signed certificate with an
+unknown CN (rejected by the app).
 
 ## Certificate renewal and rotation
 
