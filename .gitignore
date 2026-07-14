@@ -41,3 +41,5 @@ build/
 /ca.crt
 /client.crt
 /client.key
+# Scratch certificate captures from the rotation walkthrough
+/old-cert.pem

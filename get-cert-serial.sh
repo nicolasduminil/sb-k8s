@@ -1,0 +1,1 @@
+kubectl get secret sb-k8s-cert -o jsonpath='{.data.tls\.crt}' | base64 -d | openssl x509 -noout -serial -dates

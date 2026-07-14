@@ -17,3 +17,4 @@ data:
     spring.ssl.bundle.jks.server.truststore.location = ${CERT_PATH}/truststore.jks
     spring.ssl.bundle.jks.server.truststore.password = ${PASSWORD}
     spring.ssl.bundle.jks.server.truststore.type = JKS
+    spring.ssl.bundle.jks.server.reload-on-update = true

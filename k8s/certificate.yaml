@@ -29,4 +29,5 @@ spec:
     - server auth
     - digital signature
     - key encipherment
+  duration: 1h
   renewBefore: 5m
