@@ -31,24 +31,28 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-security</artifactId>
     </dependency>
+    <!-- Tier 1 (unit): MockMvc slice with @WithUserDetails - fast, no cluster. -->
     <dependency>
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-test</artifactId>
       <scope>test</scope>
     </dependency>
-    <!-- Real HTTPS integration tests: REST Assured drives the running server with
-         actual client certificates; BouncyCastle mints the throwaway CA hierarchy
-         and JKS key/trust stores the handshake needs. -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-webmvc-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- Tier 2 (e2e, *IT via failsafe): REST Assured hits the deployed app over
+         real mTLS using the cluster-issued certs; skipped when no cluster is up. -->
     <dependency>
       <groupId>io.rest-assured</groupId>
       <artifactId>rest-assured</artifactId>
       <version>5.5.0</version>
-      <scope>test</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.bouncycastle</groupId>
-      <artifactId>bcpkix-jdk18on</artifactId>
-      <version>1.84</version>
       <scope>test</scope>
     </dependency>
   </dependencies>
@@ -62,6 +66,21 @@
             <arg>-proc:full</arg>
           </compilerArgs>
         </configuration>
+      </plugin>
+      <!-- Runs the *IT e2e tests in the integration-test/verify phases (surefire
+           runs the *Test unit tier). The e2e tests self-skip when no cluster is
+           reachable, so `mvn verify` stays green on a bare checkout. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-failsafe-plugin</artifactId>
+        <executions>
+          <execution>
+            <goals>
+              <goal>integration-test</goal>
+              <goal>verify</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
       <plugin>
         <groupId>org.springframework.boot</groupId>

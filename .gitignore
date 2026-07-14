@@ -45,5 +45,9 @@ build/
 /admin.key
 /user.crt
 /user.key
+/intruder.crt
+/intruder.key
+# PKCS12 keystores the e2e test loads (built from the extracted certs)
+/*.p12
 # Scratch certificate captures from the rotation walkthrough
 /old-cert.pem

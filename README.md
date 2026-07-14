@@ -156,11 +156,11 @@ authentication layer — CA trust alone is no longer enough.
 
 | Artifact | Change |
 |----------|--------|
-| `pom.xml` | Adds `spring-boot-starter-security`, plus `rest-assured` and `bouncycastle` (`bcpkix`) for the HTTPS integration test (Groovy is pinned to 4.0.x there, the line REST Assured expects). |
+| `pom.xml` | Adds `spring-boot-starter-security`; test-only `spring-security-test`/`webmvc-test` (unit tier) and `rest-assured` (e2e tier, via failsafe; Groovy pinned to 4.0.x, the line REST Assured expects). |
 | `SecurityConfig.java` | New — the X.509 filter chain (baseline `anyRequest().authenticated()`), CN→principal regex, the in-memory identity registry and `@EnableMethodSecurity(jsr250Enabled = true)`. |
 | `K8sSbController.java` | `/hello/{who}` now names the authenticated caller; adds `/whoami` (echoes the resolved identity + authorities) and an admin-only `/admin`. Roles are enforced with JSR-250 `@RolesAllowed`. |
-| `k8s/client-certificate.yaml` | Now issues **two** client certificates — `sb-k8s-admin` and `sb-k8s-user` (different CNs) — into `sb-k8s-admin-cert` / `sb-k8s-user-cert`, replacing the single `sb-k8s-client`. |
-| `skaffold.yaml` / `redeploy.sh` / `start-all.sh` | The `reset` hook deletes the two new secrets, and the scripts extract `admin.crt/key` and `user.crt/key`. |
+| `k8s/client-certificate.yaml` | Now issues **three** client certificates with different CNs — `sb-k8s-admin`, `sb-k8s-user` and `sb-k8s-intruder` (CA-signed but not a known identity, for the e2e rejection case) — replacing the single `sb-k8s-client`. |
+| `skaffold.yaml` / `redeploy.sh` / `start-all.sh` | The `reset` hook deletes the new secrets; the scripts extract the three client certs and build the PKCS12 keystores (`admin.p12`/`user.p12`/`intruder.p12` + `truststore.p12`) that `SecurityE2eIT` loads. |
 
 ## Testing identity-based authorization
 
@@ -204,15 +204,27 @@ to plain mTLS (both hold a CA-signed certificate) are told apart by *identity*.
 Dropping the client certificate entirely still fails at the handshake exactly as
 on the `mtls` branch, since `client-auth = need` is unchanged.
 
-All of this is covered without a cluster by `SecurityIntegrationTest`
-(`mvn test`). It is a genuine integration test: it boots the app on HTTPS with
-`client-auth = need` and drives it with **REST Assured** over a real TLS
-handshake, presenting actual client certificates. A throwaway CA hierarchy and
-the JKS key/trust stores are minted in-memory by `TestPki` (via BouncyCastle),
-mirroring what cert-manager does in the cluster — so the test exercises the whole
-chain end to end, including the two cases a mocked principal cannot reach: a
-missing certificate (handshake refused) and a CA-signed certificate with an
-unknown CN (rejected by the app).
+### Testing
+
+The tests come in two tiers:
+
+- **`SecurityAuthorizationTest` — unit (`mvn test`).** A fast `@WebMvcTest`
+  MockMvc slice with no cluster. `@WithUserDetails("sb-k8s-admin"/"sb-k8s-user")`
+  loads the principal from the real `UserDetailsService`, so the CN→roles mapping
+  and the `@RolesAllowed` rules are exercised; only the TLS/certificate handshake
+  itself is out of scope.
+- **`SecurityE2eIT` — end to end (`mvn verify`).** A **REST Assured** test that
+  hits the *deployed* app on `https://localhost:8443` over a real mTLS handshake,
+  presenting the actual cluster-issued certificates. It reuses the PKCS12
+  keystores that `start-all.sh` / `redeploy.sh` build from the extracted certs, so
+  it covers the two cases the unit tier structurally cannot: a missing certificate
+  (handshake refused) and a CA-signed certificate with an unknown CN — the
+  `sb-k8s-intruder` cert — rejected by the app. It **self-skips** when no cluster
+  is up, so `mvn verify` stays green on a bare checkout; to run it for real:
+
+      $ ./start-all.sh                              # or ./redeploy.sh mtls-security
+      $ kubectl port-forward svc/sb-k8s 8443:8443   # if not already forwarding
+      $ mvn verify
 
 ## Certificate renewal and rotation
 

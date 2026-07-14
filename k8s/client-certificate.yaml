@@ -45,3 +45,26 @@ spec:
     - client auth
     - digital signature
   renewBefore: 5m
+---
+# A CA-signed certificate whose CN is deliberately NOT one of the known
+# identities in SecurityConfig. It clears the mTLS handshake (the CA is trusted)
+# yet the app rejects it (401/403) - the e2e case that proves authorization is
+# keyed on identity, not merely on CA trust.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sb-k8s-intruder
+spec:
+  issuerRef:
+    name: ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  secretName: sb-k8s-intruder-cert
+  commonName: sb-k8s-intruder
+  usages:
+    - client auth
+    - digital signature
+  renewBefore: 5m
