@@ -1,14 +1,17 @@
-# The CLIENT certificate, signed by the SAME CA issuer as the server. Because
-# the server trusts that CA, this certificate is accepted during the mTLS
-# handshake; any client without a CA-signed certificate is rejected.
+# CLIENT certificates, signed by the SAME CA issuer as the server. Because the
+# server trusts that CA, both pass the transport-level mTLS handshake. Spring
+# Security X.509 then reads each certificate's CN and maps it to an application
+# identity with roles (see SecurityConfig):
+#   CN=sb-k8s-admin -> ROLE_ADMIN + ROLE_USER
+#   CN=sb-k8s-user  -> ROLE_USER
+# This is what turns "any CA-signed client" into a named, authorized user.
 #
-# It is stored as PEM (tls.crt / tls.key / ca.crt) in the sb-k8s-client-cert
-# secret so it can be handed straight to curl:
-#   curl --cacert ca.crt --cert tls.crt --key tls.key https://localhost:8443/...
+# Each is stored as PEM (tls.crt / tls.key / ca.crt) so it can be handed to curl:
+#   curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/...
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:
-  name: sb-k8s-client
+  name: sb-k8s-admin
 spec:
   issuerRef:
     name: ca-issuer
@@ -17,8 +20,27 @@ spec:
   privateKey:
     algorithm: ECDSA
     size: 256
-  secretName: sb-k8s-client-cert
-  commonName: sb-k8s-client
+  secretName: sb-k8s-admin-cert
+  commonName: sb-k8s-admin
+  usages:
+    - client auth
+    - digital signature
+  renewBefore: 5m
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sb-k8s-user
+spec:
+  issuerRef:
+    name: ca-issuer
+    kind: Issuer
+    group: cert-manager.io
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  secretName: sb-k8s-user-cert
+  commonName: sb-k8s-user
   usages:
     - client auth
     - digital signature

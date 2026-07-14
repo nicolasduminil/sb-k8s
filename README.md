@@ -1,9 +1,13 @@
 # From Spring Boot to K8S
 
-> This section documents the `mtls` branch, which builds on the
-> `cert-manager` branch above. Everything already described (Skaffold, buildpacks,
-> the JKS keystore, the ConfigMap, `SPRING_CONFIG_ADDITIONAL_LOCATION`, …) still
-> applies; only the differences are listed here.
+> This section documents the `mtls-security` branch, which builds on the `mtls`
+> branch. Everything already described for mutual TLS still applies (the CA
+> hierarchy, `server.ssl.client-auth = need`, certificate rotation, …); on top of
+> it this branch adds **Spring Security X.509**, so the client certificate is no
+> longer just a key to the door — it becomes the caller's authenticated identity,
+> and access is authorized on it. The mTLS material below is retained as the
+> foundation this branch stands on; the new layer is described in
+> [Identity-based authorization with Spring Security X.509](#identity-based-authorization-with-spring-security-x509).
 > 
 
 # Mutual TLS (mTLS)
@@ -116,11 +120,94 @@ system's trust store once (you still need `--cert`/`--key` for client auth):
     Hello toto
 
 
-> **Note** — at this stage authentication stops at the transport layer: the
-> server accepts or refuses the handshake but the application itself does not yet
-> know *who* the caller is. Mapping the client certificate to an authenticated
-> principal (and authorizing on it) with Spring Security X.509 is the subject of a
-> later branch.
+# Identity-based authorization with Spring Security X.509
+
+On the `mtls` branch authentication stopped at the transport layer: the server
+accepted or refused the TLS handshake, but the application itself had no idea
+*who* the caller was — every CA-signed certificate was equally, anonymously
+accepted. This branch closes that gap. Spring Security reads the client
+certificate that already cleared the handshake, extracts its subject Common Name
+and maps it to a named principal with roles. The certificate stops being a mere
+door key and becomes the user's identity; endpoints are then authorized on that
+identity.
+
+## How it works
+
+The mTLS handshake is unchanged — `server.ssl.client-auth = need` still requires
+a CA-signed client certificate. What is new is a Spring Security filter chain
+(`SecurityConfig`) configured for X.509 authentication:
+
+  - `x509().subjectPrincipalRegex("CN=(.*?)(?:,|$)")` pulls the CN out of the
+    certificate subject as the principal name;
+  - a `UserDetailsService` resolves that name to roles:
+    `CN=sb-k8s-admin` → `ROLE_ADMIN` + `ROLE_USER`, `CN=sb-k8s-user` → `ROLE_USER`;
+  - per-endpoint role checks are declared with **JSR-250 annotations** on the
+    controller (`@EnableMethodSecurity(jsr250Enabled = true)`): `@RolesAllowed("ADMIN")`
+    on `/admin`, `@RolesAllowed("USER")` on `/hello` and `/whoami`;
+  - the filter chain keeps only the baseline that can't be annotated:
+    `/actuator/health/**` is open for probes, the rest of `/actuator/**` needs
+    `ROLE_ADMIN`, and `anyRequest().authenticated()` ensures every other call is at
+    least a certificate-resolved identity.
+
+The decisive consequence: a certificate that is CA-signed (so it clears the
+handshake) but whose CN is **not** in the `UserDetailsService` is rejected at the
+authentication layer — CA trust alone is no longer enough.
+
+## What changed compared to the `mtls` branch
+
+| Artifact | Change |
+|----------|--------|
+| `pom.xml` | Adds `spring-boot-starter-security` (and `-actuator`), plus `spring-security-test` / `spring-boot-starter-webmvc-test` for the tests. |
+| `SecurityConfig.java` | New — the X.509 filter chain, CN→principal regex, the in-memory identity registry, `@EnableMethodSecurity(jsr250Enabled = true)` and the actuator/baseline rules. |
+| `K8sSbController.java` | `/hello/{who}` now names the authenticated caller; adds `/whoami` (echoes the resolved identity + authorities) and an admin-only `/admin`. Roles are enforced with JSR-250 `@RolesAllowed`. |
+| `k8s/client-certificate.yaml` | Now issues **two** client certificates — `sb-k8s-admin` and `sb-k8s-user` (different CNs) — into `sb-k8s-admin-cert` / `sb-k8s-user-cert`, replacing the single `sb-k8s-client`. |
+| `skaffold.yaml` / `redeploy.sh` / `start-all.sh` | The `reset` hook deletes the two new secrets, and the scripts extract `admin.crt/key` and `user.crt/key`. |
+
+## Testing identity-based authorization
+
+Deploy and extract both identities (`redeploy.sh` does this automatically on this
+branch):
+
+    $ ./redeploy.sh mtls-security
+    $ kubectl port-forward svc/sb-k8s 8443:8443      # or: skaffold dev --port-forward
+
+Confirm the two client certificates are issued:
+
+    $ kubectl get certificate
+    NAME           READY   SECRET              AGE
+    sb-k8s         True    sb-k8s-cert         1m
+    sb-k8s-ca      True    sb-k8s-ca           1m
+    sb-k8s-admin   True    sb-k8s-admin-cert   1m
+    sb-k8s-user    True    sb-k8s-user-cert    1m
+
+Either identity can greet, and the response names the caller — the CN travelled
+all the way from the certificate to the controller:
+
+    $ curl --cacert ca.crt --cert user.crt --key user.key https://localhost:8443/hello/toto
+    Hello toto, greeted by sb-k8s-user
+
+    $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/whoami
+    {"identity":"sb-k8s-admin","authorities":["ROLE_ADMIN","ROLE_USER"]}
+
+Only the admin identity reaches the admin-only endpoint. The user certificate is
+a perfectly valid, CA-signed, authenticated identity — it simply lacks the role,
+so it is rejected with `403 Forbidden` **inside the application**, not at the
+handshake:
+
+    $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/admin
+    Hello sb-k8s-admin, you have elevated (admin) access
+
+    $ curl --cacert ca.crt --cert user.crt --key user.key https://localhost:8443/admin
+    {"status":403,"error":"Forbidden", ...}
+
+That 403 is the whole point of this branch: two callers that are indistinguishable
+to plain mTLS (both hold a CA-signed certificate) are told apart by *identity*.
+Dropping the client certificate entirely still fails at the handshake exactly as
+on the `mtls` branch, since `client-auth = need` is unchanged.
+
+The same authorization rules are covered without a cluster by
+`SecurityAuthorizationTest` (`mvn test`), which uses the Spring Security test
+support to stand in for the certificate-resolved principal.
 
 ## Certificate renewal and rotation
 
@@ -158,7 +245,7 @@ Here are the steps:
 
 2. If you manually have activated the port forwarding then kill it. Then, redeploy by running `redeploy.sh`:
 
-       $ ./redeploy.sh mtls
+       $ ./redeploy.sh mtls-security
 
 3. Forward the port either manually, as shown below, or use `skaffold dev --port-forward`, which survives pod restarts:
 
@@ -166,8 +253,8 @@ Here are the steps:
 
 4. Confirm that the `curl` request below works. 
 
-       $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
-       Hello toto
+       $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/hello/toto
+       Hello toto, greeted by sb-k8s-admin
 
 **Experiment A — no `reload-on-update`: the pod breaks after an hour**
 
@@ -175,7 +262,7 @@ Here are the steps:
    the secret ~5 minutes before expiry, but the running app never reloaded it and is
    still serving the certificate that it have read at startup, which has now expired, so the same call fails:
 
-       $ curl --cacert ca.crt --cert client.crt --key client.key \
+       $ curl --cacert ca.crt --cert admin.crt --key admin.key \
            https://localhost:8443/hello/toto
        curl: (60) SSL certificate problem: certificate has expired
 
@@ -187,15 +274,15 @@ Here are the steps:
 
 7. Redeploy and forward again:
 
-       $ ./redeploy.sh mtls
+       $ ./redeploy.sh mtls-security
        $ kubectl port-forward svc/sb-k8s 8443:8443
 
 8. Come back again after an hour and repeat the exact same call. This time the
    server reloaded the rotated certificate in place, and because `ca.crt` (the CA)
    never changed, the unchanged client command still succeeds:
 
-       $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
-       Hello toto
+       $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/hello/toto
+       Hello toto, greeted by sb-k8s-admin
 
 The subsections below explain each moving part.
 
@@ -262,9 +349,9 @@ The renewed certificate works when this handshake still succeeds and the
 serial has changed to a later `notAfter`. Confirm a real mTLS request still goes
 through with the same `ca.crt` and client certificate as before:
 
-    $ curl --cacert ca.crt --cert client.crt --key client.key \
+    $ curl --cacert ca.crt --cert admin.crt --key admin.key \
         https://localhost:8443/hello/toto
-    Hello toto
+    Hello toto, greeted by sb-k8s-admin
 
 To confirm that the old certificate is retired:
 
@@ -286,7 +373,7 @@ certificate it read at startup and ignores the rotated secret, so once that
 in-memory certificate passes its one-hour `notAfter` the running server is presenting
 an expired certificate. From then on the client rejects it:
 
-    $ curl --cacert ca.crt --cert client.crt --key client.key \
+    $ curl --cacert ca.crt --cert admin.crt --key admin.key \
         https://localhost:8443/hello/toto
     curl: (60) SSL certificate problem: certificate has expired
 
@@ -298,16 +385,16 @@ concrete reason to enable `reload-on-update` or restart the pod on rotation: lef
 alone, a long-running pod will eventually serve a stale, expired certificate and
 break TLS on its own — even though cert-manager rotated the secret an hour earlier.
 
-> **The client certificate rotates too.** `sb-k8s-client` renews on its own
-> lifecycle, and because `client-auth = need` the *server* validates it against its
-> truststore on every handshake. An expired client certificate is refused exactly
-> like the missing one in
+> **The client certificates rotate too.** `sb-k8s-admin` and `sb-k8s-user` renew
+> on their own lifecycle, and because `client-auth = need` the *server* validates
+> them against its truststore on every handshake. An expired client certificate is
+> refused exactly like the missing one in
 > [The mTLS check](#the-mtls-check-client-authentication) — the mutual counterpart
 > of the rejection above.
 
 ## Switching branches and redeploying
 
-This repository has more than one branch: `cert-manager`, `mtls`, …. Switching
+This repository has more than one branch: `cert-manager`, `mtls`, `mtls-security`, …. Switching
 between them is a *cluster* operation. `minikube` and `cert-manager` stay up the
 whole time, only the application's own resources are recreated. In particular 
 there is no need to stop/restart minikube or to build by hand since `skaffold run`
@@ -318,12 +405,14 @@ The `redeploy.sh` helper automates the full sequence:
   - tear down:
   - optionally switch branch;
   - rebuild and redeploy;
-  - re-extract `ca.crt` and, on the `mtls` branch, the client certificate.
+  - re-extract `ca.crt` and, on `mtls`, the client certificate, or on
+    `mtls-security`, the `admin` and `user` client certificates.
 
 
-    $ ./redeploy.sh              # redeploy the current branch
-    $ ./redeploy.sh mtls         # switch to mtls, then redeploy
-    $ ./redeploy.sh cert-manager # switch to cert-manager, then redeploy
+    $ ./redeploy.sh               # redeploy the current branch
+    $ ./redeploy.sh mtls-security # switch to mtls-security, then redeploy
+    $ ./redeploy.sh mtls          # switch to mtls, then redeploy
+    $ ./redeploy.sh cert-manager  # switch to cert-manager, then redeploy
 
 Under the hood it runs `skaffold delete`, `git checkout <branch>`, then
 `skaffold run -p reset`. The `reset` profile, defined in `skaffold.yaml`,

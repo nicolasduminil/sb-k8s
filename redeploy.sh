@@ -39,7 +39,21 @@ echo "In another terminal, open a port-forward (leave it running):"
 echo "    kubectl port-forward svc/sb-k8s 8443:8443"
 echo
 
-if [[ "$BRANCH" == "mtls" ]]; then
+if [[ "$BRANCH" == "mtls-security" ]]; then
+  echo "==> mTLS+security branch: extracting the admin and user client certificates"
+  kubectl get secret sb-k8s-admin-cert -o jsonpath='{.data.tls\.crt}' | base64 -d > admin.crt
+  kubectl get secret sb-k8s-admin-cert -o jsonpath='{.data.tls\.key}' | base64 -d > admin.key
+  kubectl get secret sb-k8s-user-cert  -o jsonpath='{.data.tls\.crt}' | base64 -d > user.crt
+  kubectl get secret sb-k8s-user-cert  -o jsonpath='{.data.tls\.key}' | base64 -d > user.key
+  echo "Admin cert reaches the admin-only endpoint (succeeds):"
+  echo "    curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/admin"
+  echo "User cert is a valid identity but lacks ROLE_ADMIN (403 Forbidden):"
+  echo "    curl --cacert ca.crt --cert user.crt --key user.key https://localhost:8443/admin"
+  echo "Either identity can greet; the response names the caller:"
+  echo "    curl --cacert ca.crt --cert user.crt --key user.key https://localhost:8443/hello/toto"
+  echo "Confirm the resolved identity and roles:"
+  echo "    curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/whoami"
+elif [[ "$BRANCH" == "mtls" ]]; then
   echo "==> mTLS branch: extracting the client certificate for testing"
   kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.crt}' | base64 -d > client.crt
   kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.key}' | base64 -d > client.key
