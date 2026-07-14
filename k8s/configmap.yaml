@@ -4,9 +4,6 @@ metadata:
   name: sb-k8s
 data:
   application.properties: |
-    management.endpoints.web.exposure.include = *
-    management.endpoints.endpoint.health.show-details = always
-    management.endpoints.endpoint.health.enabled = true
     custom.property = test
     server.port = 8443
     server.ssl.bundle = server

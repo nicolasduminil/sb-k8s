@@ -39,14 +39,10 @@ public class SecurityConfig
   public SecurityFilterChain filterChain(HttpSecurity http) throws Exception
   {
     return http
-      // Per-endpoint role checks live on the controller as JSR-250 annotations.
-      // The filter chain only sets the baseline: actuator's endpoints are not our
-      // own methods (so they cannot carry annotations) and everything else must at
-      // least be an authenticated, certificate-resolved identity.
-      .authorizeHttpRequests(auth -> auth
-        .requestMatchers("/actuator/health/**").permitAll()
-        .requestMatchers("/actuator/**").hasRole("ADMIN")
-        .anyRequest().authenticated())
+      // The only web-layer rule: every request must be an authenticated,
+      // certificate-resolved identity. The per-endpoint role checks live on the
+      // controller as JSR-250 annotations.
+      .authorizeHttpRequests(auth -> auth.anyRequest().authenticated())
       // Extract the principal from the certificate subject's CN, then resolve it
       // to a UserDetails (roles). This is the "user identity based" validation.
       .x509(x509 -> x509

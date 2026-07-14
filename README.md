@@ -144,10 +144,9 @@ a CA-signed client certificate. What is new is a Spring Security filter chain
   - per-endpoint role checks are declared with **JSR-250 annotations** on the
     controller (`@EnableMethodSecurity(jsr250Enabled = true)`): `@RolesAllowed("ADMIN")`
     on `/admin`, `@RolesAllowed("USER")` on `/hello` and `/whoami`;
-  - the filter chain keeps only the baseline that can't be annotated:
-    `/actuator/health/**` is open for probes, the rest of `/actuator/**` needs
-    `ROLE_ADMIN`, and `anyRequest().authenticated()` ensures every other call is at
-    least a certificate-resolved identity.
+  - the filter chain carries a single baseline rule,
+    `anyRequest().authenticated()`, so every call is at least a
+    certificate-resolved identity; the roles are enforced by the annotations.
 
 The decisive consequence: a certificate that is CA-signed (so it clears the
 handshake) but whose CN is **not** in the `UserDetailsService` is rejected at the
@@ -157,8 +156,8 @@ authentication layer — CA trust alone is no longer enough.
 
 | Artifact | Change |
 |----------|--------|
-| `pom.xml` | Adds `spring-boot-starter-security` (and `-actuator`), plus `spring-security-test` / `spring-boot-starter-webmvc-test` for the tests. |
-| `SecurityConfig.java` | New — the X.509 filter chain, CN→principal regex, the in-memory identity registry, `@EnableMethodSecurity(jsr250Enabled = true)` and the actuator/baseline rules. |
+| `pom.xml` | Adds `spring-boot-starter-security`, plus `spring-security-test` / `spring-boot-starter-webmvc-test` for the tests. |
+| `SecurityConfig.java` | New — the X.509 filter chain (baseline `anyRequest().authenticated()`), CN→principal regex, the in-memory identity registry and `@EnableMethodSecurity(jsr250Enabled = true)`. |
 | `K8sSbController.java` | `/hello/{who}` now names the authenticated caller; adds `/whoami` (echoes the resolved identity + authorities) and an admin-only `/admin`. Roles are enforced with JSR-250 `@RolesAllowed`. |
 | `k8s/client-certificate.yaml` | Now issues **two** client certificates — `sb-k8s-admin` and `sb-k8s-user` (different CNs) — into `sb-k8s-admin-cert` / `sb-k8s-user-cert`, replacing the single `sb-k8s-client`. |
 | `skaffold.yaml` / `redeploy.sh` / `start-all.sh` | The `reset` hook deletes the two new secrets, and the scripts extract `admin.crt/key` and `user.crt/key`. |
