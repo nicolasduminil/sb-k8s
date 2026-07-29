@@ -3,122 +3,12 @@
 > This section documents the `mtls-security` branch, which builds on the `mtls`
 > branch. Everything already described for mutual TLS still applies (the CA
 > hierarchy, `server.ssl.client-auth = need`, certificate rotation, …); on top of
-> it this branch adds **Spring Security X.509**, so the client certificate is no
+> it this branch adds Spring Security X.509, so the client certificate is no
 > longer just a key to the door — it becomes the caller's authenticated identity,
 > and access is authorized on it. The mTLS material below is retained as the
 > foundation this branch stands on; the new layer is described in
 > [Identity-based authorization with Spring Security X.509](#identity-based-authorization-with-spring-security-x509).
 > 
-
-# Mutual TLS (mTLS)
-
-The `cert-manager` branch uses one-way TLS: the server presents a
-certificate, the connection is encrypted, but *anyone* who can reach the socket
-gets served. The `mtls` branch turns on mutual TLS, so the server also
-requires the *client* to present a certificate signed by a trusted CA. A caller
-without a valid client certificate is rejected during the TLS handshake. This 
-authentication happens at the transport layer.
-
-## Why a CA hierarchy is required
-
-Plain mutual TLS cannot work with a single *self-signed* issuer: every
-certificate would be its own, unrelated root, so the server would have no way to
-validate a client certificate. This branch therefore introduces a tiny in-cluster
-PKI (in `k8s/issuers.yaml`):
-
-  1. a self-signed issuer named `selfsigned-issuer` is used only to bootstrap the CA;
-  2. a CA certificate named `sb-k8s-ca` with `isCA: true` is the shared root of trust;
-  3. a CA issuer named `ca-issuer` signs both the server and the client certificates.
-
-Because both certificates share the same CA, the server's truststore, which
-`cert-manager` initializes with that CA, validates the client certificate, and vice
-versa. Namespaced `Issuer`s are used rather than `ClusterIssuer`s so the CA secret
-stays in the `default` namespace. A CA `ClusterIssuer` would expect it in
-`cert-manager`'s cluster-resource namespace instead.
-
-## What changed compared to the `cert-manager` branch
-
-| Artifact | Change |
-|----------|--------|
-| `k8s/issuers.yaml` | New — replaces `cluster-issuer.yaml`. Holds the self-signed `Issuer`, the CA `Certificate`, and the CA `Issuer` described above. |
-| `k8s/certificate.yaml` | The server certificate is now signed by `ca-issuer` (was the self-signed issuer) and declares `usages: [server auth, …]`. |
-| `k8s/client-certificate.yaml` | New — a client certificate (`sb-k8s-client`, `usages: [client auth, …]`) signed by the same `ca-issuer`, stored as PEM in the `sb-k8s-client-cert` secret. |
-| `k8s/configmap.yaml` | Adds `server.ssl.client-auth = need`, which makes a client certificate mandatory. |
-| `skaffold.yaml` | Deploys `issuers.yaml` and `client-certificate.yaml`; no longer references `cluster-issuer.yaml`. |
-
-Deploy it exactly as before:
-
-    $ skaffold run
-
-and confirm all three certificates are issued:
-
-    $ kubectl get certificate
-
-    NAME            READY   SECRET               AGE
-    sb-k8s          True    sb-k8s-cert          1m
-    sb-k8s-ca       True    sb-k8s-ca            1m
-    sb-k8s-client   True    sb-k8s-client-cert   1m
-
-## Testing mTLS
-
-First extract the client certificate, its key and the CA from the `sb-k8s-client-cert`
-secret so `curl` can use them:
-
-    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.crt}' | base64 -d > client.crt
-    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.tls\.key}' | base64 -d > client.key
-    $ kubectl get secret sb-k8s-client-cert -o jsonpath='{.data.ca\.crt}'  | base64 -d > ca.crt
-
-Port-forward the service (leave it running in its own terminal):
-
-    $ kubectl port-forward svc/sb-k8s 8443:8443
-
-### The quick way (skips server verification)
-
-You can pass `-k` (or `--insecure`) to skip verifying the *server's* certificate.
-On this branch you still have to send the *client* certificate as `-k` only turns
-off the client-side identity check of the server, it does not disable TLS or
-waive the server's `client-auth = need` requirement:
-
-    $ curl -k --cert client.crt --key client.key https://localhost:8443/hello/toto
-    Hello toto
-
-### The proper way (verifies the server too)
-
-`-k` is not required since the server certificate is verifiable, it is just signed by
-a CA (`sb-k8s-ca`) that your machine does not trust by default. `cert-manager` writes
-that CA into the `ca.crt` extracted above, so pass it with `--cacert` to validate
-the server for real. The certificate has a `localhost` SAN, which is why
-`localhost` is accepted:
-
-    $ curl --cacert ca.crt --cert client.crt --key client.key https://localhost:8443/hello/toto
-    Hello toto
-
-If you point `curl` at a CA that did *not* sign the server certificate or omit
-`--cacert` so it falls back to the system trust store, then the request fails with
-`unable to get local issuer certificate`. That is the proof the server is really
-being verified.
-
-### The mTLS check (client authentication)
-
-Now drop the client certificate but keep verifying the server. The server aborts
-the handshake because `client-auth = need`:
-
-    $ curl --cacert ca.crt https://localhost:8443/hello/toto
-    curl: (56) OpenSSL SSL_read: ... alert certificate required
-
-That rejection is the proof that mutual TLS is enforced: only callers holding a
-certificate signed by `sb-k8s-ca` are allowed through.
-
-### Trusting the CA machine-wide (optional)
-
-To avoid passing `--cacert` every time, install the CA into your operating
-system's trust store once (you still need `--cert`/`--key` for client auth):
-
-    $ sudo cp ca.crt /usr/local/share/ca-certificates/sb-k8s-ca.crt
-    $ sudo update-ca-certificates
-    $ curl --cert client.crt --key client.key https://localhost:8443/hello/toto
-    Hello toto
-
 
 # Identity-based authorization with Spring Security X.509
 
@@ -141,7 +31,7 @@ a CA-signed client certificate. What is new is a Spring Security filter chain
     certificate subject as the principal name;
   - a `UserDetailsService` resolves that name to roles:
     `CN=sb-k8s-admin` → `ROLE_ADMIN` + `ROLE_USER`, `CN=sb-k8s-user` → `ROLE_USER`;
-  - per-endpoint role checks are declared with **JSR-250 annotations** on the
+  - per-endpoint role checks are declared with JSR-250 annotations on the
     controller (`@EnableMethodSecurity(jsr250Enabled = true)`): `@RolesAllowed("ADMIN")`
     on `/admin`, `@RolesAllowed("USER")` on `/hello` and `/whoami`;
   - the filter chain carries a single baseline rule,
@@ -149,7 +39,7 @@ a CA-signed client certificate. What is new is a Spring Security filter chain
     certificate-resolved identity; the roles are enforced by the annotations.
 
 The decisive consequence: a certificate that is CA-signed (so it clears the
-handshake) but whose CN is **not** in the `UserDetailsService` is rejected at the
+handshake) but whose CN is not in the `UserDetailsService` is rejected at the
 authentication layer — CA trust alone is no longer enough.
 
 ## What changed compared to the `mtls` branch
@@ -159,7 +49,7 @@ authentication layer — CA trust alone is no longer enough.
 | `pom.xml` | Adds `spring-boot-starter-security`; test-only `spring-security-test`/`webmvc-test` (unit tier) and `rest-assured` (e2e tier, via failsafe; Groovy pinned to 4.0.x, the line REST Assured expects). |
 | `SecurityConfig.java` | New — the X.509 filter chain (baseline `anyRequest().authenticated()`), CN→principal regex, the in-memory identity registry and `@EnableMethodSecurity(jsr250Enabled = true)`. |
 | `K8sSbController.java` | `/hello/{who}` now names the authenticated caller; adds `/whoami` (echoes the resolved identity + authorities) and an admin-only `/admin`. Roles are enforced with JSR-250 `@RolesAllowed`. |
-| `k8s/client-certificate.yaml` | Now issues **three** client certificates with different CNs — `sb-k8s-admin`, `sb-k8s-user` and `sb-k8s-intruder` (CA-signed but not a known identity, for the e2e rejection case) — replacing the single `sb-k8s-client`. |
+| `k8s/client-certificate.yaml` | Now issues three client certificates with different CNs — `sb-k8s-admin`, `sb-k8s-user` and `sb-k8s-intruder` (CA-signed but not a known identity, for the e2e rejection case) — replacing the single `sb-k8s-client`. |
 | `skaffold.yaml` / `redeploy.sh` / `start-all.sh` | The `reset` hook deletes the new secrets; the scripts extract the three client certs and build the PKCS12 keystores (`admin.p12`/`user.p12`/`intruder.p12` + `truststore.p12`) that `SecurityE2eIT` loads. |
 
 ## Testing identity-based authorization
@@ -190,7 +80,7 @@ all the way from the certificate to the controller:
 
 Only the admin identity reaches the admin-only endpoint. The user certificate is
 a perfectly valid, CA-signed, authenticated identity — it simply lacks the role,
-so it is rejected with `403 Forbidden` **inside the application**, not at the
+so it is rejected with `403 Forbidden` inside the application, not at the
 handshake:
 
     $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/admin
@@ -208,18 +98,18 @@ on the `mtls` branch, since `client-auth = need` is unchanged.
 
 The tests come in two tiers:
 
-- **`SecurityAuthorizationTest` — unit (`mvn test`).** A fast `@WebMvcTest`
+- `SecurityAuthorizationTest` — unit (`mvn test`). A fast `@WebMvcTest`
   MockMvc slice with no cluster. `@WithUserDetails("sb-k8s-admin"/"sb-k8s-user")`
   loads the principal from the real `UserDetailsService`, so the CN→roles mapping
   and the `@RolesAllowed` rules are exercised; only the TLS/certificate handshake
   itself is out of scope.
-- **`SecurityE2eIT` — end to end (`mvn verify`).** A **REST Assured** test that
+- `SecurityE2eIT` — end to end (`mvn verify`). A REST Assured test that
   hits the *deployed* app on `https://localhost:8443` over a real mTLS handshake,
   presenting the actual cluster-issued certificates. It reuses the PKCS12
   keystores that `start-all.sh` / `redeploy.sh` build from the extracted certs, so
   it covers the two cases the unit tier structurally cannot: a missing certificate
   (handshake refused) and a CA-signed certificate with an unknown CN — the
-  `sb-k8s-intruder` cert — rejected by the app. It **self-skips** when no cluster
+  `sb-k8s-intruder` cert — rejected by the app. It self-skips when no cluster
   is up, so `mvn verify` stays green on a bare checkout; to run it for real:
 
       $ ./start-all.sh                              # or ./redeploy.sh mtls-security
@@ -273,7 +163,7 @@ Here are the steps:
        $ curl --cacert ca.crt --cert admin.crt --key admin.key https://localhost:8443/hello/toto
        Hello toto, greeted by sb-k8s-admin
 
-**Experiment A — no `reload-on-update`: the pod breaks after an hour**
+Experiment A — no `reload-on-update`: the pod breaks after an hour
 
 5. Go to do something else and come back after an hour. `cert-manager` rotated
    the secret ~5 minutes before expiry, but the running app never reloaded it and is
@@ -283,7 +173,7 @@ Here are the steps:
            https://localhost:8443/hello/toto
        curl: (60) SSL certificate problem: certificate has expired
 
-**Experiment B — with `reload-on-update`: the pod keeps working**
+Experiment B — with `reload-on-update`: the pod keeps working
 
 6. Enable in-place reload by adding to the bundle in `k8s/configmap.yaml`:
 
@@ -402,7 +292,7 @@ concrete reason to enable `reload-on-update` or restart the pod on rotation: lef
 alone, a long-running pod will eventually serve a stale, expired certificate and
 break TLS on its own — even though cert-manager rotated the secret an hour earlier.
 
-> **The client certificates rotate too.** `sb-k8s-admin` and `sb-k8s-user` renew
+> The client certificates rotate too. `sb-k8s-admin` and `sb-k8s-user` renew
 > on their own lifecycle, and because `client-auth = need` the *server* validates
 > them against its truststore on every handshake. An expired client certificate is
 > refused exactly like the missing one in

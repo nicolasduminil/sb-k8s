@@ -42,7 +42,6 @@ class SecurityE2eIT
   @Test
   void userIsForbiddenFromTheAdminEndpoint()
   {
-    // Valid authenticated identity, but lacks ROLE_ADMIN: rejected in the app, not at TLS.
     asClient("user.p12").get(BASE_URL + "/admin").then().statusCode(403);
   }
 
@@ -65,7 +64,6 @@ class SecurityE2eIT
   @Test
   void caSignedButUnknownIdentityIsRejected()
   {
-    // Clears the handshake (CA-signed) but its CN is no known user: CA trust alone isn't enough.
     asClient("intruder.p12").get(BASE_URL + "/hello/toto")
       .then().statusCode(anyOf(is(401), is(403)));
   }
@@ -73,7 +71,6 @@ class SecurityE2eIT
   @Test
   void withoutAClientCertificateTheHandshakeIsRefused()
   {
-    // No keystore -> client-auth=need aborts the handshake before any HTTP status.
     RequestSpecification noCert = given().config(new RestAssuredConfig().sslConfig(
       sslConfig().trustStore("truststore.p12", PASSWORD).trustStoreType("PKCS12")));
     Throwable thrown = catchThrowable(() -> noCert.get(BASE_URL + "/hello/toto").then().statusCode(200));
