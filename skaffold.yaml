@@ -12,6 +12,8 @@ build:
         builder: paketobuildpacks/builder-jammy-base
         trustBuilder: true
         env:
+          # Must match <jdk.version> in pom.xml - skaffold can't read Maven
+          # properties, so the two builds would otherwise drift apart.
           - "BP_JVM_VERSION=21"
 manifests:
   rawYaml:

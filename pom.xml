@@ -13,8 +13,8 @@
   <artifactId>k8s-sb</artifactId>
   <version>1.0-SNAPSHOT</version>
   <properties>
-    <maven.compiler.source>21</maven.compiler.source>
-    <maven.compiler.target>21</maven.compiler.target>
+    <jdk.version>21</jdk.version>
+    <java.version>${jdk.version}</java.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
   <dependencies>
@@ -31,22 +31,13 @@
   <build>
     <plugins>
       <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-compiler-plugin</artifactId>
-        <configuration>
-          <compilerArgs>
-            <arg>-proc:full</arg>
-          </compilerArgs>
-        </configuration>
-      </plugin>
-      <plugin>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-maven-plugin</artifactId>
         <configuration>
           <image>
             <name>nicolasduminil/k8s-sb:buildpacks</name>
             <env>
-              <BP_JVM_VERSION>25</BP_JVM_VERSION>
+              <BP_JVM_VERSION>${jdk.version}</BP_JVM_VERSION>
             </env>
             <publish>true</publish>
           </image>
