@@ -12,8 +12,6 @@ build:
         builder: paketobuildpacks/builder-jammy-base
         trustBuilder: true
         env:
-          # Must match <jdk.version> in pom.xml - skaffold can't read Maven
-          # properties, so the two builds would otherwise drift apart.
           - "BP_JVM_VERSION=21"
 manifests:
   rawYaml:
@@ -23,19 +21,12 @@ manifests:
     - k8s/deployment.yaml
     - k8s/secret.yaml
     - k8s/service.yaml
-# Auto port-forward the HTTPS service to localhost:8443 when running
-# `skaffold dev --port-forward`. Skaffold re-establishes the forward
-# automatically whenever the pod is replaced (rollout, crash, redeploy).
 portForward:
   - resourceType: service
     resourceName: sb-k8s
     port: 8443
     localPort: 8443
 profiles:
-  # `skaffold run -p reset` (used by redeploy.sh) deletes the cert-manager
-  # -generated secrets before deploying, so they are re-issued cleanly - useful
-  # when switching branches, since their contents differ between cert-manager
-  # and mtls. Kept in a profile so plain `skaffold dev`/`run` don't churn certs.
   - name: reset
     deploy:
       kubectl:
